@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda run -n DS5230 python -c ':*)"
+    ]
+  }
+}
