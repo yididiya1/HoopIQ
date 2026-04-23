@@ -1,41 +1,41 @@
 # NBA Play-by-Play Association Rule Mining
 ### Unsupervised Machine Learning Project
 
-> **Goal:** Discover which basketball movements, dribble patterns, and play creation types associate with scoring, misses, and efficiency outcomes — using Association Rule Mining on NBA tracking data.
+> **Goal:** Discover which basketball moves and play patterns associate with scoring, misses, and other outcomes — using Association Rule Mining on NBA play-by-play data.
 
 ---
 
-## What Changed from v1 (Play-by-Play) → v2 (Tracking)
+## How It Works
 
-**v1 problem:** Raw play-by-play only logs *events* (shots, turnovers) — not *how* they happened. No dribbles, no movements, no touch time.
+Raw NBA play-by-play events (shots, turnovers, rebounds) are fetched using the `nba_api` `PlayByPlayV3` endpoint. Each game is segmented into possessions, and each possession becomes a transaction: a set of move tokens (what happened) plus an outcome token (what it ended in). FP-Growth is then run over all transactions to surface statistically meaningful rules.
 
-**v2 solution:** Three richer NBA tracking data sources:
+---
 
-| Source | What it captures | API Endpoint |
+## Pipeline (5 steps)
+
+| Step | Script | What it does |
 |---|---|---|
-| **Synergy Play Types** | HOW the possession was created (isolation, P&R, cut, etc.) | `SynergyPlayTypes` |
-| **Shot Dribble Dashboard** | How many dribbles before the shot (0, 1, 2, 3-6, 7+) | `PlayerDashPtShots` |
-| **Shot Touch Time Dashboard** | How long ball was held before shot (<2s, 2-6s, 6+s) | `PlayerDashPtShots` |
+| 1 | `1_data_pull.py` | Fetches PlayByPlayV3 CSVs from `nba_api`, saves one file per game to `data/raw/` |
+| 2 | `2_preprocessing.py` | Segments games into possessions, encodes moves into tokens, saves `data/transactions.csv` |
+| 3 | `3_arm_mining.py` | Runs FP-Growth on transactions, filters rules by outcome, saves `data/rules.csv` |
+| 4 | `4_visualization.py` | Generates network graph, lift heatmap, and top-rules bar chart in `data/plots/` |
+| 5 | `5_dashboard.py` | Builds a self-contained `data/dashboard.html` with interactive rule explorer and benchmark |
 
 ---
 
 ## Transaction Design
 
-Each transaction = one player × situation profile + outcome:
+Each transaction = one possession + outcome:
 
 ```
-{isolation, few_dribbles, long_touch, mid_range}      → miss
-{pick_and_roll_bh, no_dribbles, quick_touch, three_pointer} → score
-{cut, no_dribbles, quick_touch, at_rim}               → score
-{post_up, many_dribbles, long_touch, at_rim}          → score
-{spot_up, no_dribbles, quick_touch, three_pointer}    → miss
+{drive, pick_and_roll, layup}            → score
+{isolation, step_back, jump_shot}        → miss
+{transition, dunk}                       → score
+{post_up, fadeaway, mid_range}           → miss
+{cut, off_rebound, putback}              → score
 ```
 
-Four transaction types are built and pooled:
-- **Synergy** — play type + efficiency outcome
-- **Dribble** — dribble count + shot zone + FG outcome
-- **Touch** — touch time + shot zone + FG outcome
-- **Combined** — all three merged per player (richest)
+Possessions are tracked accurately: after a missed shot the outcome is deferred until the rebound is seen, so offensive-rebound continuations (miss → board → putback) are merged into one transaction.
 
 ---
 
@@ -43,28 +43,42 @@ Four transaction types are built and pooled:
 
 | Category | Tokens |
 |---|---|
-| Play creation | `isolation`, `pick_and_roll_bh`, `pick_and_roll_roll`, `post_up`, `spot_up`, `cut`, `handoff`, `off_screen`, `transition`, `off_rebound` |
-| Dribbles | `no_dribbles`, `one_dribble`, `two_dribbles`, `few_dribbles`, `many_dribbles` |
-| Touch time | `quick_touch`, `medium_touch`, `long_touch` |
-| Shot zone | `at_rim`, `short_mid_range`, `mid_range`, `three_pointer` |
-| Frequency | `high_freq_play`, `low_freq_play` |
-| Outcomes | `score`, `miss`, `turnover_prone`, `high_efficiency`, `low_efficiency` |
+| Shot creation | `pick_and_roll`, `cut`, `drive`, `isolation`, `post_up`, `transition`, `off_ball_screen`, `flare_screen`, `dribble_handoff` |
+| Shot type | `jump_shot`, `layup`, `dunk`, `three_pointer`, `pull_up`, `step_back`, `fadeaway`, `floater`, `hook_shot`, `alley_oop`, `putback`, `bank_shot` |
+| Moves | `euro_step`, `spin_move`, `pump_fake`, `no_look_pass`, `mid_range` |
+| Possession events | `off_rebound` |
+| Outcomes | `score`, `miss`, `turnover`, `foul_score`, `foul_miss` |
 
 ---
 
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt
+pip install nba_api pandas mlxtend tqdm matplotlib seaborn networkx
 bash run_all.sh 2022-23
 ```
 
 Or step by step:
+
 ```bash
-python 1_data_pull.py --season 2022-23
-python 2_preprocessing.py --season 2022-23
-python 3_arm_mining.py --min_support 0.02 --min_confidence 0.30 --min_lift 1.1
+# Pull play-by-play (default: 100 games; use --max_games 0 for a full season)
+python 1_data_pull.py --season 2022-23 --max_games 100
+
+# Optional: filter to one team
+python 1_data_pull.py --season 2022-23 --team GSW
+
+# Build possession transactions
+python 2_preprocessing.py
+python 2_preprocessing.py --team GSW   # keep only GSW possessions
+
+# Mine rules
+python 3_arm_mining.py --min_support 0.01 --min_confidence 0.35 --min_lift 1.1
+
+# Visualizations
 python 4_visualization.py
+
+# Interactive dashboard
+python 5_dashboard.py --team GSW --season 2022-23
 ```
 
 ---
@@ -73,18 +87,43 @@ python 4_visualization.py
 
 | File | Contents |
 |---|---|
-| `data/rules.csv` | All mined outcome rules |
-| `data/rules_combined_only.csv` | Only rich multi-context rules |
-| `data/plots/network.png` | Rule network graph |
-| `data/plots/lift_heatmap.png` | Token × outcome lift heatmap |
-| `data/plots/top_rules_by_outcome.png` | Top rules per outcome |
-| `data/plots/play_type_outcome_map.png` | Play type efficiency comparison |
+| `data/raw/<game_id>.csv` | Raw PlayByPlayV3 data, one file per game |
+| `data/transactions.csv` | One possession per row, comma-separated tokens |
+| `data/rules.csv` | All mined outcome rules (antecedent, consequent, support, confidence, lift) |
+| `data/plots/network.png` | Rule network graph (nodes = tokens, edges = rules, color = outcome) |
+| `data/plots/lift_heatmap.png` | Single-token action × outcome lift heatmap |
+| `data/plots/top_rules_by_outcome.png` | Top rules per outcome, sorted by lift |
+| `data/dashboard.html` | Self-contained HTML dashboard (no server needed — just open in a browser) |
+
+---
+
+## Dashboard Pages
+
+The `dashboard.html` generated by `5_dashboard.py` has five pages:
+
+- **Overview** — possession stats, scoring event breakdown (donut), top action frequency bars, top raw sequences
+- **Pattern Rules** — full rules table with token badges; sortable and filterable by outcome
+- **Play Suggester** — filter rules by play style, confidence, lift, and sequence length
+- **Benchmark** — FP-Growth sweep across support thresholds (rules found vs. runtime)
+- **Load Data** — quick reference commands to refresh the pipeline
+
+---
+
+## ARM Parameters
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `--min_support` | `0.01` | Fraction of possessions a pattern must appear in |
+| `--min_confidence` | `0.35` | P(outcome \| antecedent) threshold |
+| `--min_lift` | `1.1` | Must be above baseline; >1.5 is strong |
+
+Leaky tokens (`assist`, `steal`, `block`, `foul_drawn`, `rebound`) are blocked from rule antecedents — they are structural artifacts of outcomes and would trivially predict them.
 
 ---
 
 ## Extensions
 
-- **Sequential mining:** Use PrefixSpan on possession sequences
-- **Team segmentation:** Compare rule sets per team
-- **Season comparison:** Track how rules shift across seasons
-- **Defender distance:** Add `open_shot` / `contested_shot` tokens from tracking
+- **Team comparison:** Run preprocessing with `--team` for each team and diff rule sets
+- **Season comparison:** Track which rules are stable vs. season-specific
+- **Sequential mining:** Use PrefixSpan on ordered move sequences within possessions
+- **Defender distance:** Add `open_shot` / `contested_shot` tokens from tracking data
